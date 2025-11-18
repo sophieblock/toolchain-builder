@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qrew-toolchain"
+version = "0.1.0"
+description = "Standalone builder and CLI for LLVM/MLIR 19 (Allo-patched) toolchain"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "QREW Team"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+qrew-toolchain = "qrew_toolchain.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qrew_toolchain = ["py.typed"]

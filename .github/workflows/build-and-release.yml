@@ -1,0 +1,299 @@
+name: Build and Release LLVM/MLIR Toolchain
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  LLVM_VERSION: "19"
+  ALLO_REPO: "sophieblock/allo"
+
+jobs:
+  build-toolchain:
+    name: Build LLVM/MLIR Toolchain
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos-arm64
+            arch: arm64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            arch: x86_64
+    
+    steps:
+      - name: Checkout toolchain-builder repository
+        uses: actions/checkout@v4
+        with:
+          path: toolchain-builder
+
+      - name: Checkout Allo repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ALLO_REPO }}
+          path: allo
+          submodules: false
+
+      - name: Get LLVM commit SHA from Allo submodules
+        id: llvm-sha
+        run: |
+          cd allo
+          LLVM_SHA=$(git submodule status externals/llvm-project | awk '{print $1}' | sed 's/^-//')
+          echo "sha=${LLVM_SHA}" >> $GITHUB_OUTPUT
+          echo "LLVM SHA: ${LLVM_SHA}"
+
+      - name: Cache LLVM source
+        id: cache-llvm-source
+        uses: actions/cache@v4
+        with:
+          path: llvm-project
+          key: llvm-source-${{ steps.llvm-sha.outputs.sha }}
+
+      - name: Clone LLVM project at specific SHA
+        if: steps.cache-llvm-source.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --single-branch https://github.com/llvm/llvm-project.git llvm-project-tmp
+          cd llvm-project-tmp
+          git fetch --depth=1000 origin ${{ steps.llvm-sha.outputs.sha }}
+          git checkout ${{ steps.llvm-sha.outputs.sha }}
+          cd ..
+          mv llvm-project-tmp llvm-project
+
+      - name: Apply LLVM patch from Allo
+        run: |
+          cd llvm-project
+          git apply --verbose ../allo/externals/llvm_patch
+          git diff
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            clang \
+            lld \
+            ccache \
+            python3-dev \
+            python3-pip
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake ninja ccache
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.os }}-llvm-${{ steps.llvm-sha.outputs.sha }}
+          max-size: "5G"
+
+      - name: Configure LLVM/MLIR build
+        run: |
+          mkdir -p llvm-build
+          cd llvm-build
+          
+          CMAKE_ARGS=(
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DLLVM_ENABLE_PROJECTS="mlir"
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;NVPTX;AMDGPU"
+            -DLLVM_ENABLE_ASSERTIONS=ON
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON
+            -DPython3_EXECUTABLE=$(which python3)
+            -DCMAKE_INSTALL_PREFIX=$(pwd)
+          )
+          
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            CMAKE_ARGS+=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_USE_LINKER=lld)
+          fi
+          
+          cmake "${CMAKE_ARGS[@]}" ../llvm-project/llvm
+
+      - name: Build LLVM/MLIR
+        run: |
+          cd llvm-build
+          ninja -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Install LLVM/MLIR
+        run: |
+          cd llvm-build
+          ninja install
+
+      - name: Create toolchain tarball
+        run: |
+          tar -czf llvm-mlir-toolchain-${{ matrix.platform }}.tar.gz llvm-build
+
+      - name: Upload toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-mlir-toolchain-${{ matrix.platform }}
+          path: llvm-mlir-toolchain-${{ matrix.platform }}.tar.gz
+          retention-days: 7
+
+  build-allo:
+    name: Build Allo Wheel
+    needs: build-toolchain
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos-arm64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+    
+    steps:
+      - name: Checkout Allo repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ALLO_REPO }}
+          path: allo
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools pybind11
+
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja
+
+      - name: Download toolchain artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm-mlir-toolchain-${{ matrix.platform }}
+
+      - name: Extract toolchain
+        run: |
+          tar -xzf llvm-mlir-toolchain-${{ matrix.platform }}.tar.gz
+          echo "LLVM_BUILD_DIR=$(pwd)/llvm-build" >> $GITHUB_ENV
+
+      - name: Build Allo wheel
+        run: |
+          cd allo
+          export LLVM_BUILD_DIR=${{ env.LLVM_BUILD_DIR }}
+          python -m build --wheel
+
+      - name: Rename wheel with platform tag
+        run: |
+          cd allo/dist
+          WHEEL_FILE=$(ls *.whl)
+          WHEEL_BASE=$(echo $WHEEL_FILE | sed 's/-py3.*\.whl$//')
+          NEW_WHEEL="${WHEEL_BASE}-py3-none-any.whl"
+          mv "$WHEEL_FILE" "allo-${{ matrix.platform }}-py3-none-any.whl"
+          ls -lh
+
+      - name: Upload Allo wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: allo-wheel-${{ matrix.platform }}
+          path: allo/dist/allo-${{ matrix.platform }}-py3-none-any.whl
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-toolchain, build-allo]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          
+          # Copy toolchain tarballs
+          cp artifacts/llvm-mlir-toolchain-macos-arm64/llvm-mlir-toolchain-macos-arm64.tar.gz release-assets/
+          cp artifacts/llvm-mlir-toolchain-linux-x86_64/llvm-mlir-toolchain-linux-x86_64.tar.gz release-assets/
+          
+          # Copy Allo wheels
+          cp artifacts/allo-wheel-macos-arm64/allo-macos-arm64-py3-none-any.whl release-assets/
+          cp artifacts/allo-wheel-linux-x86_64/allo-linux-x86_64-py3-none-any.whl release-assets/
+          
+          ls -lh release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-assets/*
+          body: |
+            ## LLVM/MLIR 19 (Allo-patched) Toolchain + Allo Wheel
+            
+            This release provides pre-built LLVM/MLIR 19 toolchains with Allo patches and Allo Python wheels.
+            
+            ### Platforms
+            - **macOS**: arm64 (Apple Silicon)
+            - **Linux**: x86_64 (Ubuntu 24.04)
+            
+            ### Installation
+            
+            Quick install:
+            ```bash
+            curl -sSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/download_and_setup.sh | bash
+            ```
+            
+            Or download artifacts manually and extract:
+            ```bash
+            # Download toolchain
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/llvm-mlir-toolchain-<platform>.tar.gz
+            tar -xzf llvm-mlir-toolchain-<platform>.tar.gz -C ~/.qrew-toolchain
+            
+            # Download and install Allo wheel
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/allo-<platform>-py3-none-any.whl
+            pip install allo-<platform>-py3-none-any.whl
+            ```
+            
+            ### Usage
+            
+            After installation, set up environment:
+            ```bash
+            eval $(qrew-toolchain)
+            ```
+            
+            ### Contents
+            - `llvm-mlir-toolchain-*.tar.gz`: LLVM/MLIR 19 toolchain with Allo patches
+            - `allo-*.whl`: Allo Python package wheel
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
