@@ -21,6 +21,8 @@ jobs:
   build-toolchain:
     name: Build LLVM/MLIR Toolchain
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -153,6 +155,8 @@ jobs:
     name: Build Allo Wheel
     needs: build-toolchain
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
