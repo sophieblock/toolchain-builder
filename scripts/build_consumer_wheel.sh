@@ -31,6 +31,7 @@ if [[ -z "${LLVM_BUILD_DIR:-}" ]]; then
 fi
 
 mkdir -p "${CONSUMER_DIR}/dist"
-python -m pip wheel "${CONSUMER_DIR}" -w "${CONSUMER_DIR}/dist"
+# Use conda environment's Python explicitly to avoid externally-managed-environment errors
+"${CONDA_PREFIX}/bin/python" -m pip wheel "${CONSUMER_DIR}" -w "${CONSUMER_DIR}/dist"
 echo ">> Wheel(s) written to ${CONSUMER_DIR}/dist:"
 ls -lh "${CONSUMER_DIR}/dist"

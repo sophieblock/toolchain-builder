@@ -20,8 +20,9 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${ENV_NAME}"
 
 # Install this repo's helper CLI in editable mode
-python -m pip install -U pip wheel
-python -m pip install -e .
+# Use the conda environment's pip explicitly to avoid externally-managed-environment errors
+"${CONDA_PREFIX}/bin/python" -m pip install -U pip wheel
+"${CONDA_PREFIX}/bin/python" -m pip install -e .
 
 echo ">> Conda env '${ENV_NAME}' ready and activated."
 python -V
