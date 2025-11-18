@@ -19,6 +19,7 @@ mkdir -p "${CACHE_DIR}"
 REPO="${GITHUB_REPOSITORY:-.}"
 if [[ "${REPO}" == "." ]]; then
   echo "Set GITHUB_REPOSITORY=owner/repo or run inside a GitHub Actions job."
+  exit 1
 fi
 
 echo ">> Downloading latest toolchain for ${TRIPLET} into ${CACHE_DIR}"
