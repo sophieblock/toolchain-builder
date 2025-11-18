@@ -1,248 +1,85 @@
-# Toolchain Builder
+# Toolchain Builder (macOS arm64, conda‑first)
 
-Standalone builder for LLVM/MLIR 19 (Allo-patched) + Allo wheel.
+**Purpose.** Produce a reusable **LLVM/MLIR** build for **macOS arm64** and expose it via environment variables (`LLVM_BUILD_DIR`, `CMAKE_PREFIX_PATH`, etc.) so any project can compile/link against it. This repo does **not** depend on third‑party sources in CI; it only builds stock `llvm-project` at a ref you choose and applies **optional local patches**.
 
-This repository provides automated builds of LLVM/MLIR 19 with Allo-specific patches, along with pre-built Allo Python wheels. It's designed to simplify the setup process for downstream projects like QREW.
+## What the CI does
+- Runs on **macOS arm64** (`macos-14`) only.
+- Checks out `llvm-project` at `llvm_ref` (default: `llvmorg-19.1.0`).
+- Applies optional patches under `patches/` if present.
+- Configures with **MLIR Python bindings enabled** and builds with Ninja.
+- Uploads a compressed build dir: `llvm-mlir-macos-arm64.tar.gz`.
+- On tag pushes (`v*`), publishes artifacts to a GitHub Release.
 
-## Supported Platforms
-
-- **macOS**: arm64 (Apple Silicon) - `macos-14`
-- **Linux**: x86_64 (Ubuntu 24.04) - `ubuntu-24.04`
-
-## Features
-
-- 🔧 Pre-built LLVM/MLIR 19 toolchain with Allo patches
-- 🐍 Pre-built Allo Python wheels
-- 📦 Automated CI/CD pipeline for reproducible builds
-- 🚀 Easy installation with a single command
-- 🔌 CLI tool for environment setup
-
-## Quick Start
-
-### Installation
-
-Install the toolchain and Allo wheel with a single command:
-
+## One‑time local setup (conda only)
 ```bash
-curl -sSL https://raw.githubusercontent.com/sophieblock/toolchain-builder/main/scripts/download_and_setup.sh | bash
-```
-
-Or download and run the script manually:
-
-```bash
-wget https://raw.githubusercontent.com/sophieblock/toolchain-builder/main/scripts/download_and_setup.sh
-chmod +x download_and_setup.sh
-./download_and_setup.sh
-```
-
-### Custom Installation Directory
-
-```bash
-./download_and_setup.sh --dir /opt/qrew-toolchain
-```
-
-### Install Specific Version
-
-```bash
-./download_and_setup.sh --version v0.1.0
-```
-
-## Usage
-
-### Setting Up Environment
-
-After installation, set up your environment with:
-
-```bash
-eval $(qrew-toolchain)
-```
-
-Or manually export the variables:
-
-```bash
-export LLVM_BUILD_DIR="${HOME}/.qrew-toolchain/llvm-build"
-export PATH="${LLVM_BUILD_DIR}/bin:${PATH}"
-export LD_LIBRARY_PATH="${LLVM_BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
-```
-
-### Using the CLI Tool
-
-The `qrew-toolchain` CLI tool helps you set up environment variables:
-
-```bash
-# Print exports for bash/zsh (default)
-qrew-toolchain
-
-# Print exports for fish shell
-qrew-toolchain --shell fish
-
-# Use in your shell profile
-echo 'eval $(qrew-toolchain)' >> ~/.bashrc
-```
-
-### Installing qrew-toolchain CLI
-
-To install the CLI tool:
-
-```bash
+# 0) Clone this repo, cd into it
+git clone https://github.com/<you>/toolchain-builder
 cd toolchain-builder
-pip install -e .
+
+# 1) Create a conda env and install the helper CLI
+bash scripts/create_conda_env.sh qrew-llvm      # env name optional (default qrew-llvm)
+
+# 2) Tell the helper where to download from (this repo)
+export GITHUB_REPOSITORY=<you>/toolchain-builder
+
+# 3) Download + extract the latest toolchain artifact for macOS arm64
+bash scripts/download_and_setup.sh
+
+# 4) Export environment variables into the current shell
+eval "$(toolchain-builder)"
+# Now you have:
+#   LLVM_BUILD_DIR=/Users/<you>/.cache/toolchain-builder/llvm-mlir/macos-arm64/build
+#   CMAKE_PREFIX_PATH=$LLVM_BUILD_DIR/lib/cmake:$CMAKE_PREFIX_PATH
+#   (optional) LLVM_DIR, MLIR_DIR under $LLVM_BUILD_DIR/lib/cmake
 ```
 
-## Building from Source
-
-The GitHub Actions workflow automatically builds the toolchain for each platform. To build manually:
-
-### Prerequisites
-
-**macOS:**
+## Build a consumer wheel using this toolchain (example: Allo, done outside this repo)
 ```bash
-brew install cmake ninja ccache
+# With conda env active and env exported via toolchain-builder
+# 1) Get your consumer source (fork or local path). Example:
+git clone https://github.com/<you>/allo.git   # as an example consumer
+# 2) Build a wheel that links against the shared toolchain
+bash scripts/build_consumer_wheel.sh ./allo
+# 3) Install that wheel locally
+python -m pip install ./allo/dist/*.whl
+# 4) Quick import smoke test (example for Allo)
+python - <<'PY'
+import importlib
+m = importlib.import_module("allo")
+air = importlib.import_module("allo.ir")
+print("Import OK:", m.__version__)
+print("IR OK:", type(air).__name__)
+PY
 ```
 
-**Ubuntu:**
+## Reusing the wheel in **other repositories**
+**Option A — local path**
 ```bash
-sudo apt-get update
-sudo apt-get install -y cmake ninja-build clang lld ccache python3-dev
+# In another repo's conda env:
+python -m pip install /absolute/path/to/allo/dist/allo-<ver>-cp312-*.whl
 ```
 
-### Build Steps
-
-1. Clone the Allo repository and get the LLVM SHA:
+**Option B — GitHub Release URL**
+1. Attach your wheel file(s) to a Release in either the consumer repo or this toolchain repo.
+2. Install by URL:
 ```bash
-git clone https://github.com/sophieblock/allo.git
-cd allo
-LLVM_SHA=$(git submodule status externals/llvm-project | awk '{print $1}' | sed 's/^-//')
+python -m pip install \
+  https://github.com/<owner>/<repo>/releases/download/<tag>/allo-<ver>-cp312-*-macosx_12_0_arm64.whl
+```
+3. Pinning in `requirements.txt`:
+```
+# requirements.txt
+https://github.com/<owner>/<repo>/releases/download/<tag>/allo-<ver>-cp312-*-macosx_12_0_arm64.whl
 ```
 
-2. Clone LLVM at the specific commit:
-```bash
-git clone https://github.com/llvm/llvm-project.git
-cd llvm-project
-git checkout $LLVM_SHA
-```
+> Tip: keep wheels per‑platform. This repo only ships **macOS arm64** toolchains. If you later add Linux, publish separate artifacts and wheels by platform tag.
 
-3. Apply Allo patches:
-```bash
-git apply ../allo/externals/llvm_patch
-```
+## Changing LLVM version or applying patches
+- Run the workflow manually with a different `llvm_ref` (tag like `llvmorg-19.1.5` or a commit SHA).
+- Put `.patch` files under `patches/common/` or `patches/<name>/` and run the workflow with `patch_set=<name>`. Patches apply in alphanumeric order.
 
-4. Build LLVM/MLIR:
-```bash
-mkdir build && cd build
-cmake -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS="mlir" \
-  -DLLVM_TARGETS_TO_BUILD="X86;AArch64;NVPTX;AMDGPU" \
-  -DLLVM_ENABLE_ASSERTIONS=ON \
-  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-  ../llvm
-ninja
-```
-
-5. Build Allo wheel:
-```bash
-cd ../../allo
-export LLVM_BUILD_DIR=/path/to/llvm-project/build
-python -m build --wheel
-```
-
-## CI/CD Pipeline
-
-The repository includes a comprehensive GitHub Actions workflow (`.github/workflows/build-and-release.yml`) that:
-
-1. **Builds LLVM/MLIR Toolchain**:
-   - Checks out the Allo repository
-   - Extracts LLVM commit SHA from submodules
-   - Clones LLVM at the specific commit
-   - Applies Allo patches
-   - Builds LLVM/MLIR with optimizations
-   - Creates a tarball of the build artifacts
-
-2. **Builds Allo Wheel**:
-   - Downloads the toolchain artifact
-   - Builds Allo using the toolchain
-   - Creates platform-specific wheels
-
-3. **Creates Release** (on version tags):
-   - Automatically creates a GitHub Release
-   - Uploads all artifacts (toolchains and wheels)
-   - Includes installation instructions
-
-### Triggering Builds
-
-- **Automatic**: Push to `main` or `develop` branches
-- **Tags**: Push a tag matching `v*` (e.g., `v0.1.0`) to create a release
-- **Manual**: Use workflow dispatch from GitHub Actions tab
-
-## Project Structure
-
-```
-toolchain-builder/
-├── .github/
-│   └── workflows/
-│       └── build-and-release.yml    # CI/CD pipeline
-├── scripts/
-│   └── download_and_setup.sh        # Installation script
-├── src/
-│   └── qrew_toolchain/
-│       ├── __init__.py
-│       └── cli.py                   # CLI tool for env exports
-├── pyproject.toml                   # Python package configuration
-├── .gitignore
-└── README.md
-```
-
-## Environment Variables
-
-The toolchain uses the following environment variables:
-
-- `LLVM_BUILD_DIR`: Path to the LLVM build directory
-- `QREW_TOOLCHAIN_ROOT`: Root directory of the installed toolchain
-- `PATH`: Updated to include LLVM binaries
-- `LD_LIBRARY_PATH`: Updated to include LLVM libraries (Linux)
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-
-1. CI pipeline passes on all platforms
-2. Changes are documented in the README
-3. Version tags follow semantic versioning
-
-## License
-
-This project inherits the license from the LLVM project and Allo. See individual components for details.
-
-## Related Projects
-
-- [Allo](https://github.com/cornell-zhang/allo) - A composable programming model for high-performance ML accelerators
-- [LLVM](https://llvm.org/) - The LLVM Compiler Infrastructure
-- [MLIR](https://mlir.llvm.org/) - Multi-Level Intermediate Representation
-
-## Troubleshooting
-
-### Toolchain not found
-
-If `qrew-toolchain` reports that the toolchain is not found:
-
-1. Ensure the installation completed successfully
-2. Check that `~/.qrew-toolchain` exists
-3. Set `QREW_TOOLCHAIN_ROOT` manually if using a custom location
-
-### Build failures
-
-If building from source fails:
-
-1. Ensure all prerequisites are installed
-2. Check that you have enough disk space (LLVM builds require ~30GB)
-3. Verify the LLVM SHA matches the one in Allo's submodules
-4. Check that patches apply cleanly
-
-### Import errors with Allo
-
-If you get import errors when using Allo:
-
-1. Ensure `LLVM_BUILD_DIR` is set correctly
-2. Verify the Allo wheel was installed: `pip list | grep allo`
-3. Check Python version compatibility (requires Python 3.12+)
+## FAQ
+- **Do I need conda for CI?** No. CI uses Homebrew tools on `macos-14`. Conda is for local isolation only.
+- **Can I install the helper CLI without editable mode?** Yes: `python -m pip install .` (inside the repo).
+- **Where is the toolchain placed?** By default under `~/.cache/toolchain-builder/llvm-mlir/macos-arm64/build`. Override with `toolchain-builder --build-dir <path>` when printing exports.
+- **How do I undo the exports?** Start a new shell or `unset LLVM_BUILD_DIR` etc.

@@ -1,0 +1,442 @@
+
+You are the GitHub PR assistant for this brand‑new repository. Create an initial pull request that turns this repo into a **standalone LLVM/MLIR toolchain builder for macOS arm64 only**, with **conda-only** virtual environments for local use. Do **NOT** check out any third‑party repos. The artifacts must be usable by any consumer project (e.g., Allo, TVM, custom repos) via `LLVM_BUILD_DIR`.
+
+**Key requirements**
+- Target: **macOS arm64** only (GitHub Actions label `macos-14`). No Linux/Windows.
+- Build **stock llvm-project** at a configurable git ref (tag/branch/commit). Default: `llvmorg-19.1.0`.
+- Support **optional local patches** under `patches/` (applied if present).
+- Upload a compressed **build directory artifact** named `llvm-mlir-macos-arm64.tar.gz`.
+- Provide a tiny Python CLI **`toolchain-builder`** that prints the environment export lines (`LLVM_BUILD_DIR`, `CMAKE_PREFIX_PATH`, `LLVM_DIR`, `MLIR_DIR`).
+- Provide **conda-only** helper scripts and a **detailed README** that shows how to:
+  - create/activate a conda env,
+  - install the helper CLI,
+  - download/extract the toolchain artifact,
+  - export environment variables,
+  - **build a wheel** for a *consumer* repo (e.g., Allo) using this toolchain,
+  - reuse that wheel in **other repositories** via local path or a GitHub Release URL.
+- Absolutely no use of Allo (or any external project) inside CI; only example commands in the README.
+
+Make the following changes exactly (create files as needed) with the contents below.
+
+--------------------------------------------------------------------------------
+FILE: .github/workflows/build-and-release.yml
+--------------------------------------------------------------------------------
+name: Build LLVM/MLIR toolchain (macOS arm64, standalone)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: "llvm-project git ref to build (tag/branch/commit)"
+        required: false
+        default: "llvmorg-19.1.0"
+      patch_set:
+        description: "Optional patch set name under patches/ to apply (leave blank for none)"
+        required: false
+        default: ""
+  push:
+    branches: ["main", "ci/**"]
+    tags: ["v*"]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  toolchain:
+    name: Build LLVM/MLIR (macOS arm64)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build deps (Homebrew)
+        run: |
+          brew update --preinstall || true
+          brew install ninja cmake || true
+
+      - name: Clone llvm-project at ref
+        env:
+          LLVM_REF: ${{ github.event.inputs.llvm_ref || 'llvmorg-19.1.0' }}
+        run: |
+          mkdir -p toolchain && cd toolchain
+          git clone https://github.com/llvm/llvm-project.git
+          git -C llvm-project checkout "${LLVM_REF}"
+
+      - name: Apply optional patches (if any)
+        env:
+          PATCH_SET: ${{ github.event.inputs.patch_set || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="${GITHUB_WORKSPACE}"
+          SRC="${GITHUB_WORKSPACE}/toolchain/llvm-project"
+          # Apply common patches
+          if compgen -G "${ROOT}/patches/common/*.patch" > /dev/null; then
+            for p in ${ROOT}/patches/common/*.patch; do
+              echo "Applying common patch: $p"
+              git -C "${SRC}" apply "$p"
+            done
+          fi
+          # Apply named patch set
+          if [[ -n "${PATCH_SET}" ]] && compgen -G "${ROOT}/patches/${PATCH_SET}/*.patch" > /dev/null; then
+            for p in ${ROOT}/patches/${PATCH_SET}/*.patch; do
+              echo "Applying ${PATCH_SET} patch: $p"
+              git -C "${SRC}" apply "$p"
+            done
+          fi
+
+      - name: Configure (CMake + Ninja)
+        run: |
+          cmake -G Ninja -S toolchain/llvm-project/llvm -B toolchain/build \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;openmp" \
+            -DLLVM_TARGETS_TO_BUILD=host \
+            -DLLVM_BUILD_EXAMPLES=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+            -DPython3_EXECUTABLE="${{ env.pythonLocation }}/bin/python3"
+
+      - name: Build (Ninja)
+        run: cmake --build toolchain/build -- -v
+
+      - name: Package toolchain build dir
+        run: |
+          mkdir -p out
+          tar -C toolchain/build -czf out/llvm-mlir-macos-arm64.tar.gz .
+          ls -lh out/llvm-mlir-macos-arm64.tar.gz
+
+      - name: Upload toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-mlir-macos-arm64
+          path: out/llvm-mlir-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release with artifacts (on tag)
+    needs: [toolchain]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: macos-14
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_artifacts
+
+      - name: Show collected artifacts
+        run: find release_artifacts -type f -maxdepth 2 -print
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_artifacts/**/*
+
+--------------------------------------------------------------------------------
+FILE: pyproject.toml
+--------------------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toolchain-builder"
+version = "0.2.0"
+description = "Helper CLI to print environment exports for a prebuilt LLVM/MLIR toolchain (macOS arm64)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "Sophie Block"}]
+dependencies = []
+
+[project.scripts]
+toolchain-builder = "toolchain_builder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+--------------------------------------------------------------------------------
+FILE: src/toolchain_builder/cli.py
+--------------------------------------------------------------------------------
+import argparse
+import platform
+from pathlib import Path
+
+DEFAULT_CACHE = Path.home() / ".cache" / "toolchain-builder" / "llvm-mlir"
+
+def detect_triplet() -> str:
+    sys = platform.system().lower()
+    mach = platform.machine().lower()
+    if sys == "darwin" and mach in ("arm64", "aarch64"):
+        return "macos-arm64"
+    return f"{sys}-{mach}"
+
+def default_build_dir() -> Path:
+    return DEFAULT_CACHE / detect_triplet() / "build"
+
+def print_exports(build_dir: Path) -> None:
+    cmake_prefix = build_dir / "lib" / "cmake"
+    print(f'export LLVM_BUILD_DIR="{build_dir}"')
+    print(f'export CMAKE_PREFIX_PATH="{cmake_prefix}:$' + '{CMAKE_PREFIX_PATH}"')
+    print(f'# Optional CMake hints:')
+    print(f'export LLVM_DIR="{cmake_prefix}/llvm"')
+    print(f'export MLIR_DIR="{cmake_prefix}/mlir"')
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Print exports for a given LLVM/MLIR build dir")
+    ap.add_argument("--build-dir", type=str, default=None,
+                    help="LLVM build directory (default: ~/.cache/toolchain-builder/llvm-mlir/<triplet>/build)")
+    args = ap.parse_args()
+    bd = Path(args.build_dir) if args.build_dir else default_build_dir()
+    if not bd.exists():
+        print(f"# WARNING: build dir does not exist yet: {bd}")
+    print_exports(bd)
+
+if __name__ == "__main__":
+    main()
+
+--------------------------------------------------------------------------------
+FILE: scripts/create_conda_env.sh
+--------------------------------------------------------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create and activate a conda env for building/using the toolchain locally
+# Usage:
+#   bash scripts/create_conda_env.sh [env_name]
+# Default env name: qrew-llvm
+
+ENV_NAME="${1:-qrew-llvm}"
+
+if ! command -v conda >/dev/null 2>&1; then
+  echo "Conda not found. Install Miniforge/Mambaforge or Anaconda, then retry." >&2
+  exit 1
+fi
+
+# Create env with Python, pip, and build helpers
+conda create -y -n "${ENV_NAME}" python=3.12 cmake ninja pip
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "${ENV_NAME}"
+
+# Install this repo's helper CLI in editable mode
+"${CONDA_PREFIX}/bin/python" -m pip install -U pip wheel
+"${CONDA_PREFIX}/bin/python" -m pip install -e .
+
+echo ">> Conda env '${ENV_NAME}' ready and activated."
+python -V
+echo ">> Next:"
+echo "   1) export GITHUB_REPOSITORY=OWNER/REPO"
+echo "   2) bash scripts/download_and_setup.sh"
+echo "   3) eval \"\$(toolchain-builder)\""
+
+--------------------------------------------------------------------------------
+FILE: scripts/download_and_setup.sh
+--------------------------------------------------------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+# macOS arm64 only: download the latest toolchain artifact, extract to cache, and print export instructions.
+# Requires: gh CLI (authenticated) OR manual download from Releases.
+
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+if [[ "$OS" != "Darwin" || "$ARCH" != "arm64" ]]; then
+  echo "This script supports macOS arm64 only." >&2
+  exit 1
+fi
+
+TRIPLET="macos-arm64"
+CACHE_DIR="${HOME}/.cache/toolchain-builder/llvm-mlir/${TRIPLET}"
+BUILD_DIR="${CACHE_DIR}/build"
+mkdir -p "${CACHE_DIR}"
+
+REPO="${GITHUB_REPOSITORY:-.}"
+if [[ "${REPO}" == "." ]]; then
+  echo "Set GITHUB_REPOSITORY=owner/repo or run inside a GitHub Actions job."
+fi
+
+echo ">> Downloading latest toolchain for ${TRIPLET} into ${CACHE_DIR}"
+if command -v gh >/dev/null 2>&1; then
+  gh release download --repo "${REPO}" --pattern "*${TRIPLET}*.tar.gz" --dir "${CACHE_DIR}" --clobber || {
+    echo "Failed to download via gh. Please download from the Releases page manually."
+    exit 1
+  }
+else
+  echo "Install GitHub CLI (gh) or manually download from the Releases page."
+  exit 1
+fi
+
+TARBALL="$(ls -1 "${CACHE_DIR}"/*"${TRIPLET}"*.tar.gz | head -n1)"
+if [[ ! -f "$TARBALL" ]]; then
+  echo "No tarball found for ${TRIPLET} in ${CACHE_DIR}" >&2
+  exit 1
+fi
+
+mkdir -p "${BUILD_DIR}"
+tar -C "${BUILD_DIR}" -xzf "${TARBALL}"
+
+echo
+echo ">> To set environment for this shell, run:"
+echo "eval \"\$(python -m toolchain_builder --build-dir '${BUILD_DIR}')\""
+echo
+
+--------------------------------------------------------------------------------
+FILE: scripts/build_consumer_wheel.sh
+--------------------------------------------------------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build a wheel for a *consumer* project (e.g., Allo) using the exported LLVM/MLIR toolchain.
+# Assumes you already ran download_and_setup.sh and eval'ed toolchain-builder exports in your conda env.
+# Usage:
+#   bash scripts/build_consumer_wheel.sh /path/to/consumer_repo
+# The wheel is written to <consumer_repo>/dist/
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $0 /path/to/consumer_repo" >&2
+  exit 1
+fi
+
+CONSUMER_DIR="$1"
+
+# Ensure we're in a conda env
+if [[ -z "${CONDA_PREFIX:-}" ]]; then
+  echo "Please 'conda activate <env>' first." >&2
+  exit 1
+fi
+
+# Ensure toolchain env vars are set (best effort)
+if [[ -z "${LLVM_BUILD_DIR:-}" ]]; then
+  if command -v toolchain-builder >/dev/null 2>&1; then
+    eval "$(toolchain-builder)"
+  else
+    echo "toolchain-builder CLI not found; run 'python -m pip install -e .' in this repo." >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "${CONSUMER_DIR}/dist"
+python -m pip wheel "${CONSUMER_DIR}" -w "${CONSUMER_DIR}/dist"
+echo ">> Wheel(s) written to ${CONSUMER_DIR}/dist:"
+ls -lh "${CONSUMER_DIR}/dist"
+
+--------------------------------------------------------------------------------
+FILE: README.md
+--------------------------------------------------------------------------------
+# Toolchain Builder (macOS arm64, conda‑first)
+
+**Purpose.** Produce a reusable **LLVM/MLIR** build for **macOS arm64** and expose it via environment variables (`LLVM_BUILD_DIR`, `CMAKE_PREFIX_PATH`, etc.) so any project can compile/link against it. This repo does **not** depend on third‑party sources in CI; it only builds stock `llvm-project` at a ref you choose and applies **optional local patches**.
+
+## What the CI does
+- Runs on **macOS arm64** (`macos-14`) only.
+- Checks out `llvm-project` at `llvm_ref` (default: `llvmorg-19.1.0`).
+- Applies optional patches under `patches/` if present.
+- Configures with **MLIR Python bindings enabled** and builds with Ninja.
+- Uploads a compressed build dir: `llvm-mlir-macos-arm64.tar.gz`.
+- On tag pushes (`v*`), publishes artifacts to a GitHub Release.
+
+## One‑time local setup (conda only)
+```bash
+# 0) Clone this repo, cd into it
+git clone https://github.com/<you>/toolchain-builder
+cd toolchain-builder
+
+# 1) Create a conda env and install the helper CLI
+bash scripts/create_conda_env.sh qrew-llvm      # env name optional (default qrew-llvm)
+
+# 2) Tell the helper where to download from (this repo)
+export GITHUB_REPOSITORY=<you>/toolchain-builder
+
+# 3) Download + extract the latest toolchain artifact for macOS arm64
+bash scripts/download_and_setup.sh
+
+# 4) Export environment variables into the current shell
+eval "$(toolchain-builder)"
+# Now you have:
+#   LLVM_BUILD_DIR=/Users/<you>/.cache/toolchain-builder/llvm-mlir/macos-arm64/build
+#   CMAKE_PREFIX_PATH=$LLVM_BUILD_DIR/lib/cmake:$CMAKE_PREFIX_PATH
+#   (optional) LLVM_DIR, MLIR_DIR under $LLVM_BUILD_DIR/lib/cmake
+```
+
+## Build a consumer wheel using this toolchain (example: Allo, done outside this repo)
+```bash
+# With conda env active and env exported via toolchain-builder
+# 1) Get your consumer source (fork or local path). Example:
+git clone https://github.com/<you>/allo.git   # as an example consumer
+# 2) Build a wheel that links against the shared toolchain
+bash scripts/build_consumer_wheel.sh ./allo
+# 3) Install that wheel locally
+python -m pip install ./allo/dist/*.whl
+# 4) Quick import smoke test (example for Allo)
+python - <<'PY'
+import importlib
+m = importlib.import_module("allo")
+air = importlib.import_module("allo.ir")
+print("Import OK:", m.__version__)
+print("IR OK:", type(air).__name__)
+PY
+```
+
+## Reusing the wheel in **other repositories**
+**Option A — local path**
+```bash
+# In another repo's conda env:
+python -m pip install /absolute/path/to/allo/dist/allo-<ver>-cp312-*.whl
+```
+
+**Option B — GitHub Release URL**
+1. Attach your wheel file(s) to a Release in either the consumer repo or this toolchain repo.  
+2. Install by URL:
+```bash
+python -m pip install \
+  https://github.com/<owner>/<repo>/releases/download/<tag>/allo-<ver>-cp312-*-macosx_12_0_arm64.whl
+```
+3. Pinning in `requirements.txt`:
+```
+# requirements.txt
+https://github.com/<owner>/<repo>/releases/download/<tag>/allo-<ver>-cp312-*-macosx_12_0_arm64.whl
+```
+
+> Tip: keep wheels per‑platform. This repo only ships **macOS arm64** toolchains. If you later add Linux, publish separate artifacts and wheels by platform tag.
+
+## Changing LLVM version or applying patches
+- Run the workflow manually with a different `llvm_ref` (tag like `llvmorg-19.1.5` or a commit SHA).  
+- Put `.patch` files under `patches/common/` or `patches/<name>/` and run the workflow with `patch_set=<name>`. Patches apply in alphanumeric order.
+
+## FAQ
+- **Do I need conda for CI?** No. CI uses Homebrew tools on `macos-14`. Conda is for local isolation only.  
+- **Can I install the helper CLI without editable mode?** Yes: `python -m pip install .` (inside the repo).  
+- **Where is the toolchain placed?** By default under `~/.cache/toolchain-builder/llvm-mlir/macos-arm64/build`. Override with `toolchain-builder --build-dir <path>` when printing exports.  
+- **How do I undo the exports?** Start a new shell or `unset LLVM_BUILD_DIR` etc.
+
+--------------------------------------------------------------------------------
+FILE: .gitignore
+--------------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.env
+.venv
+build/
+dist/
+*.egg-info/
+.DS_Store
+toolchain/
+out/
+release_artifacts/
+patches/*.rej
+patches/*.orig
+
+--------------------------------------------------------------------------------
+END OF CHANGES
+--------------------------------------------------------------------------------
+
+After applying the changes:
+- Commit to `main` (or a short‑lived `ci/initial` branch) and open the PR.
+- Run the workflow (workflow_dispatch) with your desired `llvm_ref` (default `llvmorg-19.1.0`).
+- On your Mac (arm64), create/activate the conda env, run `download_and_setup.sh`, then `eval "$(toolchain-builder)"` and build your consumer wheel(s).

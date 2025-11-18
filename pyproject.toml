@@ -1,32 +1,19 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qrew-toolchain"
-version = "0.1.0"
-description = "Standalone builder and CLI for LLVM/MLIR 19 (Allo-patched) toolchain"
+name = "toolchain-builder"
+version = "0.2.0"
+description = "Helper CLI to print environment exports for a prebuilt LLVM/MLIR toolchain (macOS arm64)"
 readme = "README.md"
-requires-python = ">=3.8"
-authors = [
-    {name = "QREW Team"}
-]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
-]
+requires-python = ">=3.9"
+authors = [{name = "Sophie Block"}]
+dependencies = []
 
 [project.scripts]
-qrew-toolchain = "qrew_toolchain.cli:main"
+toolchain-builder = "toolchain_builder.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-qrew_toolchain = ["py.typed"]
