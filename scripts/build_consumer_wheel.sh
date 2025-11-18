@@ -20,6 +20,12 @@ if [[ -z "${CONDA_PREFIX:-}" ]]; then
   exit 1
 fi
 
+# Ensure conda environment's Python exists and is executable
+if [[ ! -x "${CONDA_PREFIX}/bin/python" ]]; then
+  echo "Error: Python executable not found in conda environment at ${CONDA_PREFIX}/bin/python" >&2
+  echo "Please check your conda environment or reactivate it." >&2
+  exit 1
+fi
 # Ensure toolchain env vars are set (best effort)
 if [[ -z "${LLVM_BUILD_DIR:-}" ]]; then
   if command -v toolchain-builder >/dev/null 2>&1; then
