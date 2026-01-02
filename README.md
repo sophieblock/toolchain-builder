@@ -2,6 +2,8 @@
 
 **Purpose.** Produce a reusable **LLVM/MLIR** build for **macOS arm64** and expose it via environment variables (`LLVM_BUILD_DIR`, `CMAKE_PREFIX_PATH`, etc.) so any project can compile/link against it. This repo does **not** depend on third‑party sources in CI; it only builds stock `llvm-project` at a ref you choose and applies **optional local patches**.
 
+> Use **Miniforge3** or **Rattler** with `conda` **≥25.x** and `conda-build` **≥25.x** (matching major/minor). Older releases are not supported here.
+
 ## What the CI does
 - Runs on **macOS arm64** (`macos-14`) only.
 - Checks out `llvm-project` at `llvm_ref` (default: `llvmorg-19.1.0`).
@@ -11,13 +13,19 @@
 - On tag pushes (`v*`), publishes artifacts to a GitHub Release.
 
 ## One‑time local setup (conda only)
+If you prefer a reproducible builder environment that already includes `conda-build`/`rattler-build` and third‑party consumers (`llvmlite`, `jaxlib`, `jax`), create it from [`envs/toolchain-builder-conda-build.yml`](envs/toolchain-builder-conda-build.yml):
+```bash
+conda env create -f envs/toolchain-builder-conda-build.yml
+conda activate toolchain-builder-conda-build
+```
+
 ```bash
 # 0) Clone this repo, cd into it
 git clone https://github.com/<you>/toolchain-builder
 cd toolchain-builder
 
 # 1) Create a conda env and install the helper CLI
-bash scripts/create_conda_env.sh qrew-llvm      # env name optional (default qrew-llvm)
+bash scripts/create_conda_env.sh qrew-llvm      # env name optional (default qrew-llvm); ensure conda >=25.x
 
 # 2) Tell the helper where to download from (this repo)
 export GITHUB_REPOSITORY=<you>/toolchain-builder
@@ -52,6 +60,10 @@ print("IR OK:", type(air).__name__)
 PY
 ```
 
+## Building LLVM with conda‑build (recommended)
+- The LLVM build process is fully scripted by `conda-build`; the `llvmdev` recipe is the canonical reference for `llvmlite`.
+- See [docs/llvm-conda-build.md](docs/llvm-conda-build.md) for a step‑by‑step flow and notes on extending to `llvmlite`, `polygeist`, and `jaxlib`/`jax`.
+
 ## Reusing the wheel in **other repositories**
 **Option A — local path**
 ```bash
@@ -83,3 +95,4 @@ https://github.com/<owner>/<repo>/releases/download/<tag>/allo-<ver>-cp312-*-mac
 - **Can I install the helper CLI without editable mode?** Yes: `python -m pip install .` (inside the repo).
 - **Where is the toolchain placed?** By default under `~/.cache/toolchain-builder/llvm-mlir/macos-arm64/build`. Override with `toolchain-builder --build-dir <path>` when printing exports.
 - **How do I undo the exports?** Start a new shell or `unset LLVM_BUILD_DIR` etc.
+- **Want a VS Code multi-root workspace?** Open [`toolchain-builder.code-workspace`](toolchain-builder.code-workspace) to get repo, docs, and source roots preloaded with Python analysis paths.

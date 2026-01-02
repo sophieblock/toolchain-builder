@@ -1,0 +1,14 @@
+{
+  "folders": [
+    { "path": "." },
+    { "path": "docs" },
+    { "path": "src" }
+  ],
+  "settings": {
+    "python.analysis.extraPaths": ["./src"],
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.mypy_cache": true
+    }
+  }
+}

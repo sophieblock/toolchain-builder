@@ -1,0 +1,19 @@
+name: toolchain-builder-conda-build
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - conda>=25.1
+  - conda-build>=25.1
+  - boa>=0.19
+  - rattler-build>=0.23
+  - mamba>=1.5
+  - cmake
+  - ninja
+  - git
+  - pip
+  - pip:
+      - llvmlite>=0.41
+      - jax>=0.4
+      - jaxlib>=0.4
+      # polygeist currently needs to be built from source against the produced LLVM toolchain.
